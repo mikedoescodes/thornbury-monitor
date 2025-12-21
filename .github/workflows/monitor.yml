@@ -19,6 +19,15 @@ jobs:
       with:
         node-version: '18'
     
+    - name: Verify files
+      run: |
+        echo "Current directory:"
+        pwd
+        echo "Files in directory:"
+        ls -la
+        echo "Checking for monitor.js:"
+        test -f monitor.js && echo "monitor.js exists" || echo "monitor.js NOT FOUND"
+    
     - name: Install dependencies
       run: npm install axios cheerio
       
