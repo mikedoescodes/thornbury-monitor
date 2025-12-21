@@ -1,0 +1,10 @@
+{
+  "name": "thornbury-monitor",
+  "version": "1.0.0",
+  "description": "Monitor Thornbury Picture House for updates",
+  "main": "monitor.js",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0-rc.12"
+  }
+}
