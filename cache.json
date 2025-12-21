@@ -1,17 +1,17 @@
 {
   "movies": [
     "Home Alone (1990)",
-    "Prime Minister",
+    "It's A Wonderful Life (1946)",
     "The History of Sound",
-    "The Muppet Christmas Carol (1992)",
+    "Twiggy",
     "Zootopia 2"
   ],
   "showtimes": [
-    "Home Alone (1990) |  6:00PM",
-    "Now ShowingCurrent MoviesCurrent Movies\nZootopia 2 - Home Alone (1990) - The Muppet Christmas Carol (1992) - The History of Sound - Prime MinisterShowtimesShowtimes\nThe Muppet Christmas Carol (1992) | 12:00PM",
-    "Prime Minister |  4:00PM",
-    "The History of Sound |  8:00PM",
-    "Zootopia 2 |  1:45PM"
+    "Home Alone (1990) |  5:30PM",
+    "It's A Wonderful Life (1946) |  2:55PM",
+    "Now ShowingCurrent MoviesCurrent Movies\nIt's A Wonderful Life (1946) - Home Alone (1990) - The History of Sound - TwiggyShowtimesShowtimes\nZootopia 2 | 10:50AM",
+    "The History of Sound |  7:30PM",
+    "Twiggy |  1:00PM"
   ],
-  "timestamp": "2025-12-21T19:10:53.906Z"
+  "timestamp": "2025-12-21T19:25:45.523Z"
 }
