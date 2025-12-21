@@ -1,0 +1,17 @@
+{
+  "movies": [
+    "Home Alone (1990)",
+    "Prime Minister",
+    "The History of Sound",
+    "The Muppet Christmas Carol (1992)",
+    "Zootopia 2"
+  ],
+  "showtimes": [
+    "Home Alone (1990) |  6:00PM",
+    "Now ShowingCurrent MoviesCurrent Movies\nZootopia 2 - Home Alone (1990) - The Muppet Christmas Carol (1992) - The History of Sound - Prime MinisterShowtimesShowtimes\nThe Muppet Christmas Carol (1992) | 12:00PM",
+    "Prime Minister |  4:00PM",
+    "The History of Sound |  8:00PM",
+    "Zootopia 2 |  1:45PM"
+  ],
+  "timestamp": "2025-12-21T05:05:36.041Z"
+}
