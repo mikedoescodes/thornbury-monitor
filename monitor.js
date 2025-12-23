@@ -1,86 +1,72 @@
 const axios = require('axios');
-const cheerio = require('cheerio');
 const fs = require('fs');
 
-const BASE_URL = 'https://www.thornburypicturehouse.com.au';
-const NOW_SHOWING_URL = `${BASE_URL}/now-showing`;
+const GRAPHQL_URL = 'https://www.thornburypicturehouse.com.au/graphql';
+const SITE_ID = 12;
 const CACHE_FILE = 'cache.json';
 
-async function fetchPage(url) {
-  try {
-    const response = await axios.get(url);
-    return response.data;
-  } catch (error) {
-    console.error(`Error fetching ${url}:`, error.message);
-    return null;
-  }
-}
-
-async function getMovieList(html) {
-  const $ = cheerio.load(html);
-  const movies = [];
-  const seen = new Set();
-  
-  // Look for all links that go to /movie/
-  $('a').each((i, el) => {
-    const href = $(el).attr('href');
-    if (href && href.includes('/movie/')) {
-      // Extract the slug from various possible formats
-      let movieSlug = href.replace(/^.*\/movie\//, '').replace(/\/$/, '');
-      const title = $(el).text().trim();
-      
-      if (movieSlug && title && !seen.has(movieSlug)) {
-        seen.add(movieSlug);
-        movies.push({ slug: movieSlug, title });
+const GRAPHQL_QUERY = `
+query ($siteIds: [ID]) {
+  showingsForDate(siteIds: $siteIds) {
+    data {
+      id
+      time
+      movie {
+        id
+        name
       }
     }
-  });
-  
-  console.log('Movies found:', movies);
-  return movies;
+  }
 }
-
-async function getMovieShowtimes(movieSlug) {
-  const url = `${BASE_URL}/movie/${movieSlug}`;
-  const html = await fetchPage(url);
-  if (!html) return [];
-  
-  const $ = cheerio.load(html);
-  const showtimes = [];
-  
-  $('a[href*="/checkout/showing/"]').each((i, el) => {
-    const text = $(el).text().trim();
-    const match = text.match(/(.*?),\s*(\d+:\d+\s*(?:am|pm))/i);
-    if (match) {
-      const dateStr = match[1].trim();
-      const timeStr = match[2].trim();
-      showtimes.push(`${dateStr} ${timeStr}`);
-    }
-  });
-  
-  return showtimes;
-}
+`;
 
 async function getAllShowtimes() {
-  console.log('Fetching now showing page...');
-  const html = await fetchPage(NOW_SHOWING_URL);
-  if (!html) return {};
-  
-  const movies = await getMovieList(html);
-  console.log(`Found ${movies.length} movies`);
-  
-  const showtimeMap = {};
-  
-  for (const movie of movies) {
-    console.log(`Fetching showtimes for: ${movie.title}`);
-    const showtimes = await getMovieShowtimes(movie.slug);
-    if (showtimes.length > 0) {
-      showtimeMap[movie.title] = showtimes.sort();
+  try {
+    const response = await axios.post(GRAPHQL_URL, {
+      query: GRAPHQL_QUERY,
+      variables: {
+        siteIds: [SITE_ID],
+        date: null
+      }
+    });
+
+    const showings = response.data.data.showingsForDate.data;
+    const showtimeMap = {};
+
+    for (const showing of showings) {
+      const movieName = showing.movie.name;
+      const time = new Date(showing.time);
+      
+      // Format: "December 23 6:10 pm"
+      const dateStr = time.toLocaleDateString('en-US', { 
+        month: 'long', 
+        day: 'numeric',
+        timeZone: 'Australia/Melbourne'
+      });
+      const timeStr = time.toLocaleTimeString('en-US', { 
+        hour: 'numeric', 
+        minute: '2-digit',
+        timeZone: 'Australia/Melbourne'
+      }).toLowerCase();
+      
+      const formattedTime = `${dateStr} ${timeStr}`;
+      
+      if (!showtimeMap[movieName]) {
+        showtimeMap[movieName] = [];
+      }
+      showtimeMap[movieName].push(formattedTime);
     }
-    await new Promise(resolve => setTimeout(resolve, 300));
+
+    // Sort showtimes for each movie
+    for (const movie in showtimeMap) {
+      showtimeMap[movie] = showtimeMap[movie].sort();
+    }
+
+    return showtimeMap;
+  } catch (error) {
+    console.error('Error fetching showtimes:', error.message);
+    return {};
   }
-  
-  return showtimeMap;
 }
 
 function loadCache() {
@@ -97,16 +83,16 @@ function saveCache(data) {
 
 function formatDateTime(isoString) {
   const date = new Date(isoString);
-  const options = { 
+  return date.toLocaleString('en-AU', { 
     weekday: 'long', 
     year: 'numeric', 
     month: 'long', 
     day: 'numeric', 
     hour: 'numeric', 
     minute: '2-digit',
+    timeZone: 'Australia/Melbourne',
     timeZoneName: 'short'
-  };
-  return date.toLocaleString('en-AU', options);
+  });
 }
 
 function detectChanges(oldData, newData) {
