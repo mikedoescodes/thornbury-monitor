@@ -2,18 +2,16 @@ const axios = require("axios");
 const fs = require("fs");
 
 const BASE = "https://www.thornburypicturehouse.com.au";
-const NOW_SHOWING_URL = `${BASE}/now-showing`;
-const GRAPHQL_URL = `${BASE}/graphql`;
+const HOME_URL = `${BASE}/`;
+const NOW_SHOWING_URL = `${BASE}/now-showing/`;
+const GRAPHQL_URL = `${BASE}/graphql`; // If your DevTools "Request URL" is different, paste it here.
 const SITE_ID = 12;
 
 const CACHE_FILE = "cache.json";
 const MEL_TZ = "Australia/Melbourne";
+const DAYS_AHEAD = 30; // today + 30 days
 
-// Rolling window: today + 30 days
-const DAYS_AHEAD = 30;
-
-// Keep the query signature matching what you saw in DevTools.
-// We set variables.date to a specific YYYY-MM-DD.
+// Match the query signature you saw in DevTools
 const GRAPHQL_QUERY = `
 query ($date: String, $ids: [ID], $movieId: ID, $movieIds: [ID], $titleClassId: ID, $titleClassIds: [ID], $siteIds: [ID], $everyShowingBadgeIds: [ID], $anyShowingBadgeIds: [ID], $resultVersion: String) {
   showingsForDate(
@@ -44,23 +42,42 @@ function browserHeaders(extra = {}) {
     Accept: "application/json, text/plain, */*",
     "Accept-Language": "en-AU,en;q=0.9",
     Origin: BASE,
-    Referer: `${NOW_SHOWING_URL}/`,
+    Referer: NOW_SHOWING_URL,
     ...extra,
   };
 }
 
-async function getCookieHeader() {
-  const resp = await axios.get(`${NOW_SHOWING_URL}/`, {
-    headers: browserHeaders({ Accept: "text/html,application/xhtml+xml" }),
-    timeout: 20000,
-    validateStatus: () => true,
-  });
-
-  const setCookie = resp.headers["set-cookie"] || [];
-  return setCookie
-    .map((c) => c.split(";")[0])
-    .filter(Boolean)
+function mergeSetCookies(existingCookieHeader, setCookieArray) {
+  const existing = new Map();
+  if (existingCookieHeader) {
+    existingCookieHeader.split(";").forEach((kv) => {
+      const [k, ...rest] = kv.trim().split("=");
+      if (!k) return;
+      existing.set(k, rest.join("="));
+    });
+  }
+  for (const c of setCookieArray || []) {
+    const [kv] = c.split(";");
+    const [k, ...rest] = kv.trim().split("=");
+    if (!k) continue;
+    existing.set(k, rest.join("="));
+  }
+  return Array.from(existing.entries())
+    .map(([k, v]) => `${k}=${v}`)
     .join("; ");
+}
+
+function extractCsrfToken(html) {
+  // Common patterns:
+  // <meta name="csrf-token" content="...">
+  // window.csrfToken = "..."
+  const metaMatch = html.match(/<meta[^>]+name=["']csrf-token["'][^>]+content=["']([^"']+)["']/i);
+  if (metaMatch?.[1]) return metaMatch[1];
+
+  const jsMatch = html.match(/csrfToken["']?\s*[:=]\s*["']([^"']+)["']/i);
+  if (jsMatch?.[1]) return jsMatch[1];
+
+  return null;
 }
 
 function toYMD(dateObj) {
@@ -84,7 +101,33 @@ function addDays(dateObj, days) {
   return d;
 }
 
-async function fetchShowingsForDate(cookieHeader, ymd) {
+async function primeSession() {
+  // Hit HOME and NOW_SHOWING to get the full cookie set, plus CSRF (if present).
+  let cookies = "";
+  let csrfToken = null;
+
+  // 1) Home page
+  const homeResp = await axios.get(HOME_URL, {
+    headers: browserHeaders({ Accept: "text/html,application/xhtml+xml" }),
+    timeout: 20000,
+    validateStatus: () => true,
+  });
+  cookies = mergeSetCookies(cookies, homeResp.headers["set-cookie"]);
+  csrfToken = csrfToken || extractCsrfToken(homeResp.data || "");
+
+  // 2) Now showing page
+  const nowResp = await axios.get(NOW_SHOWING_URL, {
+    headers: browserHeaders({ Accept: "text/html,application/xhtml+xml", Cookie: cookies }),
+    timeout: 20000,
+    validateStatus: () => true,
+  });
+  cookies = mergeSetCookies(cookies, nowResp.headers["set-cookie"]);
+  csrfToken = csrfToken || extractCsrfToken(nowResp.data || "");
+
+  return { cookies, csrfToken };
+}
+
+async function fetchShowingsForDate(session, ymd) {
   const variables = {
     siteIds: [SITE_ID],
     date: ymd,
@@ -98,49 +141,51 @@ async function fetchShowingsForDate(cookieHeader, ymd) {
     resultVersion: null,
   };
 
+  const headers = browserHeaders({
+    "Content-Type": "application/json",
+    Cookie: session.cookies,
+    "X-Requested-With": "XMLHttpRequest",
+  });
+
+  // If we found a CSRF token, include it
+  if (session.csrfToken) {
+    headers["X-CSRF-Token"] = session.csrfToken;
+  }
+
   const resp = await axios.post(
     GRAPHQL_URL,
     { query: GRAPHQL_QUERY, variables },
     {
-      headers: browserHeaders({
-        "Content-Type": "application/json",
-        Cookie: cookieHeader,
-        "X-Requested-With": "XMLHttpRequest",
-      }),
+      headers,
       timeout: 20000,
       validateStatus: () => true,
     }
   );
 
+  // Some GraphQL setups return { data: {}, error: {...} } on auth failures.
+  const bodySnippet =
+    typeof resp.data === "string"
+      ? resp.data.slice(0, 400)
+      : JSON.stringify(resp.data).slice(0, 400);
+
   if (resp.status === 403) {
-    const snippet =
-      typeof resp.data === "string"
-        ? resp.data.slice(0, 300)
-        : JSON.stringify(resp.data).slice(0, 300);
-    throw new Error(`GraphQL 403 for date=${ymd}. Body snippet: ${snippet}`);
+    throw new Error(`GraphQL 403 for date=${ymd}. Body snippet: ${bodySnippet}`);
   }
   if (resp.status < 200 || resp.status >= 300) {
-    throw new Error(
-      `GraphQL HTTP ${resp.status} for date=${ymd}: ${JSON.stringify(resp.data).slice(0, 300)}`
-    );
+    throw new Error(`GraphQL HTTP ${resp.status} for date=${ymd}. Body snippet: ${bodySnippet}`);
   }
-  if (resp.data?.errors?.length) {
-    throw new Error(
-      `GraphQL errors for date=${ymd}: ${JSON.stringify(resp.data.errors).slice(0, 500)}`
-    );
-  }
-
-  // Some GraphQL implementations return { data: {}, error: {...} } (non-standard).
-  // Handle that too:
   if (resp.data?.error?.message) {
     throw new Error(`GraphQL error for date=${ymd}: ${resp.data.error.message}`);
+  }
+  if (resp.data?.errors?.length) {
+    throw new Error(`GraphQL errors for date=${ymd}: ${JSON.stringify(resp.data.errors).slice(0, 600)}`);
   }
 
   return resp.data?.data?.showingsForDate?.data ?? [];
 }
 
 async function getAllShowtimesRollingMonth() {
-  const cookieHeader = await getCookieHeader();
+  const session = await primeSession();
 
   const map = {};
   let cursor = new Date();
@@ -148,7 +193,7 @@ async function getAllShowtimesRollingMonth() {
   for (let i = 0; i <= DAYS_AHEAD; i++) {
     const ymd = toYMD(cursor);
 
-    const showings = await fetchShowingsForDate(cookieHeader, ymd);
+    const showings = await fetchShowingsForDate(session, ymd);
 
     for (const s of showings) {
       const movie = s?.movie?.name?.trim();
@@ -179,8 +224,6 @@ async function getAllShowtimesRollingMonth() {
     }
 
     cursor = addDays(cursor, 1);
-
-    // small pause to reduce chances of rate limiting / blocking
     await new Promise((r) => setTimeout(r, 150));
   }
 
@@ -304,7 +347,7 @@ async function main() {
   try {
     newData = await getAllShowtimesRollingMonth();
   } catch (e) {
-    // IMPORTANT: don't overwrite cache, don't notify, fail the run
+    // IMPORTANT: do NOT notify and do NOT overwrite cache on auth/fetch failure
     console.error("Error fetching showtimes:", e.message || e);
     process.exit(1);
   }
