@@ -4,14 +4,16 @@ const fs = require("fs");
 const BASE = "https://www.thornburypicturehouse.com.au";
 const HOME_URL = `${BASE}/`;
 const NOW_SHOWING_URL = `${BASE}/now-showing/`;
-const GRAPHQL_URL = `${BASE}/graphql`; // If your DevTools "Request URL" is different, paste it here.
-const SITE_ID = 12;
+const GRAPHQL_URL = `${BASE}/graphql`;
 
+const SITE_ID = 12;
+const CIRCUIT_ID = 8;
 const CACHE_FILE = "cache.json";
 const MEL_TZ = "Australia/Melbourne";
-const DAYS_AHEAD = 30; // today + 30 days
 
-// Match the query signature you saw in DevTools
+// Rolling window: today + 30 days
+const DAYS_AHEAD = 30;
+
 const GRAPHQL_QUERY = `
 query ($date: String, $ids: [ID], $movieId: ID, $movieIds: [ID], $titleClassId: ID, $titleClassIds: [ID], $siteIds: [ID], $everyShowingBadgeIds: [ID], $anyShowingBadgeIds: [ID], $resultVersion: String) {
   showingsForDate(
@@ -31,19 +33,31 @@ query ($date: String, $ids: [ID], $movieId: ID, $movieIds: [ID], $titleClassId: 
       time
       movie { name }
     }
+    count
+    resultVersion
   }
 }
 `;
 
-function browserHeaders(extra = {}) {
+function buildHeaders(cookieHeader) {
+  // Mirrors your browser request headers closely (minus sec-ch-ua etc., which aren't necessary)
   return {
-    "User-Agent":
-      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    Accept: "application/json, text/plain, */*",
-    "Accept-Language": "en-AU,en;q=0.9",
-    Origin: BASE,
-    Referer: NOW_SHOWING_URL,
-    ...extra,
+    accept: "*/*",
+    "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
+    "content-type": "application/json",
+    origin: BASE,
+    referer: NOW_SHOWING_URL,
+    "user-agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+
+    // 🔑 These appear to be required by their backend auth/permission layer
+    "client-type": "consumer",
+    "circuit-id": String(CIRCUIT_ID),
+    "site-id": String(SITE_ID),
+    "is-electron-mode": "false",
+
+    // Cookies from priming requests
+    cookie: cookieHeader,
   };
 }
 
@@ -67,21 +81,38 @@ function mergeSetCookies(existingCookieHeader, setCookieArray) {
     .join("; ");
 }
 
-function extractCsrfToken(html) {
-  // Common patterns:
-  // <meta name="csrf-token" content="...">
-  // window.csrfToken = "..."
-  const metaMatch = html.match(/<meta[^>]+name=["']csrf-token["'][^>]+content=["']([^"']+)["']/i);
-  if (metaMatch?.[1]) return metaMatch[1];
+async function primeCookies() {
+  let cookies = "";
 
-  const jsMatch = html.match(/csrfToken["']?\s*[:=]\s*["']([^"']+)["']/i);
-  if (jsMatch?.[1]) return jsMatch[1];
+  const homeResp = await axios.get(HOME_URL, {
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+      accept: "text/html,application/xhtml+xml",
+      "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
+    },
+    timeout: 20000,
+    validateStatus: () => true,
+  });
+  cookies = mergeSetCookies(cookies, homeResp.headers["set-cookie"]);
 
-  return null;
+  const nowResp = await axios.get(NOW_SHOWING_URL, {
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+      accept: "text/html,application/xhtml+xml",
+      "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
+      cookie: cookies,
+    },
+    timeout: 20000,
+    validateStatus: () => true,
+  });
+  cookies = mergeSetCookies(cookies, nowResp.headers["set-cookie"]);
+
+  return cookies;
 }
 
 function toYMD(dateObj) {
-  // YYYY-MM-DD in Melbourne local date
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: MEL_TZ,
     year: "numeric",
@@ -101,91 +132,55 @@ function addDays(dateObj, days) {
   return d;
 }
 
-async function primeSession() {
-  // Hit HOME and NOW_SHOWING to get the full cookie set, plus CSRF (if present).
-  let cookies = "";
-  let csrfToken = null;
-
-  // 1) Home page
-  const homeResp = await axios.get(HOME_URL, {
-    headers: browserHeaders({ Accept: "text/html,application/xhtml+xml" }),
-    timeout: 20000,
-    validateStatus: () => true,
-  });
-  cookies = mergeSetCookies(cookies, homeResp.headers["set-cookie"]);
-  csrfToken = csrfToken || extractCsrfToken(homeResp.data || "");
-
-  // 2) Now showing page
-  const nowResp = await axios.get(NOW_SHOWING_URL, {
-    headers: browserHeaders({ Accept: "text/html,application/xhtml+xml", Cookie: cookies }),
-    timeout: 20000,
-    validateStatus: () => true,
-  });
-  cookies = mergeSetCookies(cookies, nowResp.headers["set-cookie"]);
-  csrfToken = csrfToken || extractCsrfToken(nowResp.data || "");
-
-  return { cookies, csrfToken };
-}
-
-async function fetchShowingsForDate(session, ymd) {
+async function fetchShowingsForDate(cookieHeader, ymd) {
   const variables = {
-    siteIds: [SITE_ID],
     date: ymd,
-    ids: null,
+    ids: [],
     movieId: null,
-    movieIds: null,
+    movieIds: [],
     titleClassId: null,
-    titleClassIds: null,
-    everyShowingBadgeIds: null,
+    titleClassIds: [],
+    siteIds: [SITE_ID],
+    everyShowingBadgeIds: [null],
     anyShowingBadgeIds: null,
     resultVersion: null,
   };
-
-  const headers = browserHeaders({
-    "Content-Type": "application/json",
-    Cookie: session.cookies,
-    "X-Requested-With": "XMLHttpRequest",
-  });
-
-  // If we found a CSRF token, include it
-  if (session.csrfToken) {
-    headers["X-CSRF-Token"] = session.csrfToken;
-  }
 
   const resp = await axios.post(
     GRAPHQL_URL,
     { query: GRAPHQL_QUERY, variables },
     {
-      headers,
+      headers: buildHeaders(cookieHeader),
       timeout: 20000,
       validateStatus: () => true,
     }
   );
 
-  // Some GraphQL setups return { data: {}, error: {...} } on auth failures.
-  const bodySnippet =
+  const snippet =
     typeof resp.data === "string"
       ? resp.data.slice(0, 400)
       : JSON.stringify(resp.data).slice(0, 400);
 
   if (resp.status === 403) {
-    throw new Error(`GraphQL 403 for date=${ymd}. Body snippet: ${bodySnippet}`);
+    throw new Error(`GraphQL 403 for date=${ymd}. Body snippet: ${snippet}`);
   }
   if (resp.status < 200 || resp.status >= 300) {
-    throw new Error(`GraphQL HTTP ${resp.status} for date=${ymd}. Body snippet: ${bodySnippet}`);
+    throw new Error(`GraphQL HTTP ${resp.status} for date=${ymd}. Body snippet: ${snippet}`);
   }
   if (resp.data?.error?.message) {
     throw new Error(`GraphQL error for date=${ymd}: ${resp.data.error.message}`);
   }
   if (resp.data?.errors?.length) {
-    throw new Error(`GraphQL errors for date=${ymd}: ${JSON.stringify(resp.data.errors).slice(0, 600)}`);
+    throw new Error(
+      `GraphQL errors for date=${ymd}: ${JSON.stringify(resp.data.errors).slice(0, 600)}`
+    );
   }
 
   return resp.data?.data?.showingsForDate?.data ?? [];
 }
 
 async function getAllShowtimesRollingMonth() {
-  const session = await primeSession();
+  const cookieHeader = await primeCookies();
 
   const map = {};
   let cursor = new Date();
@@ -193,7 +188,7 @@ async function getAllShowtimesRollingMonth() {
   for (let i = 0; i <= DAYS_AHEAD; i++) {
     const ymd = toYMD(cursor);
 
-    const showings = await fetchShowingsForDate(session, ymd);
+    const showings = await fetchShowingsForDate(cookieHeader, ymd);
 
     for (const s of showings) {
       const movie = s?.movie?.name?.trim();
@@ -347,7 +342,6 @@ async function main() {
   try {
     newData = await getAllShowtimesRollingMonth();
   } catch (e) {
-    // IMPORTANT: do NOT notify and do NOT overwrite cache on auth/fetch failure
     console.error("Error fetching showtimes:", e.message || e);
     process.exit(1);
   }
