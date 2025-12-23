@@ -160,19 +160,19 @@ function formatMessage(changes, timestamp) {
   
   let addedText = '';
   if (Object.keys(changes.added).length > 0) {
-    addedText = 'SESSIONS ADDED:\n';
+    addedText = 'SESSIONS ADDED:<br>\n';
     for (const [movie, times] of Object.entries(changes.added)) {
       const timesList = Array.isArray(times) ? times : [times];
-      addedText += `${movie}: ${timesList.join(', ')}\n`;
+      addedText += `${movie}: ${timesList.join(', ')}<br>\n`;
     }
   }
   
   let removedText = '';
   if (Object.keys(changes.removed).length > 0) {
-    removedText = 'SESSIONS REMOVED:\n';
+    removedText = 'SESSIONS REMOVED:<br>\n';
     for (const [movie, times] of Object.entries(changes.removed)) {
       const timesList = Array.isArray(times) ? times : [times];
-      removedText += `${movie}: ${timesList.join(', ')}\n`;
+      removedText += `${movie}: ${timesList.join(', ')}<br>\n`;
     }
   }
   
