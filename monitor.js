@@ -339,31 +339,6 @@ function detectChanges(oldData, newData) {
   return { changed, isInitial: false, added, removed };
 }
 
-  const added = {};
-  const removed = {};
-
-  for (const [movie, times] of Object.entries(newData)) {
-    if (!oldData[movie]) {
-      added[movie] = times;
-    } else {
-      const newTimes = times.filter((t) => !oldData[movie].includes(t));
-      if (newTimes.length) added[movie] = newTimes;
-    }
-  }
-
-  for (const [movie, times] of Object.entries(oldData)) {
-    if (!newData[movie]) {
-      removed[movie] = times;
-    } else {
-      const gone = times.filter((t) => !newData[movie].includes(t));
-      if (gone.length) removed[movie] = gone;
-    }
-  }
-
-  const changed = Object.keys(added).length > 0 || Object.keys(removed).length > 0;
-  return { changed, isInitial: false, added, removed };
-}
-
 function formatMessage(changes, timestampIso) {
   if (changes.isInitial) {
     return {
