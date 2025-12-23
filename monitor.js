@@ -1,79 +1,77 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const fs = require('fs');
-const puppeteer = require('puppeteer');
 
-const URL = 'https://www.thornburypicturehouse.com.au/now-showing';
+const BASE_URL = 'https://www.thornburypicturehouse.com.au';
+const NOW_SHOWING_URL = `${BASE_URL}/now-showing`;
 const CACHE_FILE = 'cache.json';
 
-async function fetchPageWithBrowser() {
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
-  
+async function fetchPage(url) {
   try {
-    const page = await browser.newPage();
-    await page.goto(URL, { waitUntil: 'networkidle0', timeout: 30000 });
-    
-    // Wait for content to load
-    await page.waitForSelector('a[href*="/checkout/showing/"]', { timeout: 10000 });
-    
-    const html = await page.content();
-    return html;
-  } finally {
-    await browser.close();
+    const response = await axios.get(url);
+    return response.data;
+  } catch (error) {
+    console.error(`Error fetching ${url}:`, error.message);
+    return null;
   }
 }
 
-function parseShowtimesWithDates(html) {
+async function getMovieList(html) {
   const $ = cheerio.load(html);
-  const showtimeMap = {};
+  const movies = new Set();
   
-  // The page structure groups showtimes by date
-  // Look for date headers and then the movies under each date
-  let currentDate = null;
-  
-  $('body').find('*').each((i, el) => {
-    const text = $(el).text().trim();
-    
-    // Check if this is a date header (e.g., "December 22", "December 23")
-    const dateMatch = text.match(/^(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})$/);
-    if (dateMatch) {
-      currentDate = text;
-      return;
-    }
-    
-    // If we have a current date and find a showtime link
-    if (currentDate && $(el).is('a[href*="/checkout/showing/"]')) {
-      const time = $(el).text().trim();
-      const href = $(el).attr('href');
-      
-      if (time.match(/\d+:\d+(AM|PM)/i)) {
-        // Extract movie name from URL
-        const match = href.match(/\/showing\/([^\/]+)\//);
-        if (match) {
-          let movieSlug = match[1];
-          let movieTitle = movieSlug
-            .split('-')
-            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-            .join(' ');
-          
-          movieTitle = movieTitle.replace(/\s(\d{4})$/, ' ($1)');
-          
-          if (!showtimeMap[movieTitle]) {
-            showtimeMap[movieTitle] = [];
-          }
-          
-          showtimeMap[movieTitle].push(`${currentDate} ${time}`);
-        }
+  $('a[href*="/movie/"]').each((i, el) => {
+    const href = $(el).attr('href');
+    if (href && href.startsWith('/movie/')) {
+      const movieSlug = href.replace('/movie/', '');
+      const title = $(el).text().trim();
+      if (title) {
+        movies.add(JSON.stringify({ slug: movieSlug, title }));
       }
     }
   });
   
-  // Sort showtimes for each movie
-  for (const movie in showtimeMap) {
-    showtimeMap[movie] = showtimeMap[movie].sort();
+  return Array.from(movies).map(m => JSON.parse(m));
+}
+
+async function getMovieShowtimes(movieSlug) {
+  const url = `${BASE_URL}/movie/${movieSlug}`;
+  const html = await fetchPage(url);
+  if (!html) return [];
+  
+  const $ = cheerio.load(html);
+  const showtimes = [];
+  
+  $('a[href*="/checkout/showing/"]').each((i, el) => {
+    const text = $(el).text().trim();
+    const match = text.match(/(.*?),\s*(\d+:\d+\s*(?:am|pm))/i);
+    if (match) {
+      const dateStr = match[1].trim();
+      const timeStr = match[2].trim();
+      showtimes.push(`${dateStr} ${timeStr}`);
+    }
+  });
+  
+  return showtimes;
+}
+
+async function getAllShowtimes() {
+  console.log('Fetching now showing page...');
+  const html = await fetchPage(NOW_SHOWING_URL);
+  if (!html) return {};
+  
+  const movies = await getMovieList(html);
+  console.log(`Found ${movies.length} movies`);
+  
+  const showtimeMap = {};
+  
+  for (const movie of movies) {
+    console.log(`Fetching showtimes for: ${movie.title}`);
+    const showtimes = await getMovieShowtimes(movie.slug);
+    if (showtimes.length > 0) {
+      showtimeMap[movie.title] = showtimes.sort();
+    }
+    await new Promise(resolve => setTimeout(resolve, 300));
   }
   
   return showtimeMap;
@@ -119,7 +117,6 @@ function detectChanges(oldData, newData) {
   const added = {};
   const removed = {};
   
-  // Find added movies and showtimes
   for (const [movie, times] of Object.entries(newData)) {
     if (!oldData[movie]) {
       added[movie] = times;
@@ -131,7 +128,6 @@ function detectChanges(oldData, newData) {
     }
   }
   
-  // Find removed movies and showtimes
   for (const [movie, times] of Object.entries(oldData)) {
     if (!newData[movie]) {
       removed[movie] = times;
@@ -206,8 +202,7 @@ async function sendNotification(message) {
 async function main() {
   console.log('Checking Thornbury Picture House...');
   
-  const html = await fetchPageWithBrowser();
-  const newData = parseShowtimesWithDates(html);
+  const newData = await getAllShowtimes();
   const oldData = loadCache();
   
   const movieCount = Object.keys(newData).length;
@@ -229,4 +224,4 @@ async function main() {
   saveCache(newData);
 }
 
-main().catch(console.error);
+main();
