@@ -3,11 +3,17 @@ const fs = require("fs");
 
 const BASE = "https://www.thornburypicturehouse.com.au";
 const NOW_SHOWING_URL = `${BASE}/now-showing`;
-const GRAPHQL_URL = `${BASE}/graphql`; // keep this unless your DevTools shows a different one
+const GRAPHQL_URL = `${BASE}/graphql`;
 const SITE_ID = 12;
+
 const CACHE_FILE = "cache.json";
 const MEL_TZ = "Australia/Melbourne";
 
+// Rolling window: today + 30 days
+const DAYS_AHEAD = 30;
+
+// Keep the query signature matching what you saw in DevTools.
+// We set variables.date to a specific YYYY-MM-DD.
 const GRAPHQL_QUERY = `
 query ($date: String, $ids: [ID], $movieId: ID, $movieIds: [ID], $titleClassId: ID, $titleClassIds: [ID], $siteIds: [ID], $everyShowingBadgeIds: [ID], $anyShowingBadgeIds: [ID], $resultVersion: String) {
   showingsForDate(
@@ -44,7 +50,6 @@ function browserHeaders(extra = {}) {
 }
 
 async function getCookieHeader() {
-  // First request: get session/WAF cookies
   const resp = await axios.get(`${NOW_SHOWING_URL}/`, {
     headers: browserHeaders({ Accept: "text/html,application/xhtml+xml" }),
     timeout: 20000,
@@ -52,21 +57,37 @@ async function getCookieHeader() {
   });
 
   const setCookie = resp.headers["set-cookie"] || [];
-  // Convert ["a=b; Path=/; ...", "c=d; ..."] -> "a=b; c=d"
-  const cookieHeader = setCookie
+  return setCookie
     .map((c) => c.split(";")[0])
     .filter(Boolean)
     .join("; ");
-
-  return cookieHeader;
 }
 
-async function getAllShowtimesViaGraphQL() {
-  const cookieHeader = await getCookieHeader();
+function toYMD(dateObj) {
+  // YYYY-MM-DD in Melbourne local date
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: MEL_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(dateObj);
 
+  const y = parts.find((p) => p.type === "year").value;
+  const m = parts.find((p) => p.type === "month").value;
+  const d = parts.find((p) => p.type === "day").value;
+  return `${y}-${m}-${d}`;
+}
+
+function addDays(dateObj, days) {
+  const d = new Date(dateObj.getTime());
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
+
+async function fetchShowingsForDate(cookieHeader, ymd) {
   const variables = {
     siteIds: [SITE_ID],
-    date: null,
+    date: ymd,
     ids: null,
     movieId: null,
     movieIds: null,
@@ -84,7 +105,6 @@ async function getAllShowtimesViaGraphQL() {
       headers: browserHeaders({
         "Content-Type": "application/json",
         Cookie: cookieHeader,
-        // Some setups expect this:
         "X-Requested-With": "XMLHttpRequest",
       }),
       timeout: 20000,
@@ -97,46 +117,71 @@ async function getAllShowtimesViaGraphQL() {
       typeof resp.data === "string"
         ? resp.data.slice(0, 300)
         : JSON.stringify(resp.data).slice(0, 300);
-    throw new Error(`GraphQL 403 blocked. Body snippet: ${snippet}`);
+    throw new Error(`GraphQL 403 for date=${ymd}. Body snippet: ${snippet}`);
   }
-
   if (resp.status < 200 || resp.status >= 300) {
-    throw new Error(`GraphQL HTTP ${resp.status}: ${JSON.stringify(resp.data).slice(0, 300)}`);
+    throw new Error(
+      `GraphQL HTTP ${resp.status} for date=${ymd}: ${JSON.stringify(resp.data).slice(0, 300)}`
+    );
   }
-
   if (resp.data?.errors?.length) {
-    throw new Error(`GraphQL errors: ${JSON.stringify(resp.data.errors).slice(0, 500)}`);
+    throw new Error(
+      `GraphQL errors for date=${ymd}: ${JSON.stringify(resp.data.errors).slice(0, 500)}`
+    );
   }
 
-  const showings = resp.data?.data?.showingsForDate?.data ?? [];
+  // Some GraphQL implementations return { data: {}, error: {...} } (non-standard).
+  // Handle that too:
+  if (resp.data?.error?.message) {
+    throw new Error(`GraphQL error for date=${ymd}: ${resp.data.error.message}`);
+  }
+
+  return resp.data?.data?.showingsForDate?.data ?? [];
+}
+
+async function getAllShowtimesRollingMonth() {
+  const cookieHeader = await getCookieHeader();
+
   const map = {};
+  let cursor = new Date();
 
-  for (const s of showings) {
-    const movie = s?.movie?.name?.trim();
-    const iso = s?.time;
-    if (!movie || !iso) continue;
+  for (let i = 0; i <= DAYS_AHEAD; i++) {
+    const ymd = toYMD(cursor);
 
-    const d = new Date(iso);
+    const showings = await fetchShowingsForDate(cookieHeader, ymd);
 
-    const dateStr = d.toLocaleDateString("en-AU", {
-      month: "long",
-      day: "numeric",
-      timeZone: MEL_TZ,
-    });
+    for (const s of showings) {
+      const movie = s?.movie?.name?.trim();
+      const iso = s?.time;
+      if (!movie || !iso) continue;
 
-    const timeStr = d
-      .toLocaleTimeString("en-AU", {
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
+      const d = new Date(iso);
+
+      const dateStr = d.toLocaleDateString("en-AU", {
+        month: "long",
+        day: "numeric",
         timeZone: MEL_TZ,
-      })
-      .toLowerCase();
+      });
 
-    const formatted = `${dateStr} ${timeStr}`;
+      const timeStr = d
+        .toLocaleTimeString("en-AU", {
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+          timeZone: MEL_TZ,
+        })
+        .toLowerCase();
 
-    if (!map[movie]) map[movie] = [];
-    map[movie].push(formatted);
+      const formatted = `${dateStr} ${timeStr}`;
+
+      if (!map[movie]) map[movie] = [];
+      map[movie].push(formatted);
+    }
+
+    cursor = addDays(cursor, 1);
+
+    // small pause to reduce chances of rate limiting / blocking
+    await new Promise((r) => setTimeout(r, 150));
   }
 
   for (const movie of Object.keys(map)) {
@@ -253,15 +298,16 @@ async function sendNotification(message) {
 async function main() {
   console.log("Checking Thornbury Picture House...");
 
-  let newData = {};
-  try {
-    newData = await getAllShowtimesViaGraphQL();
-  } catch (e) {
-    console.error("Error fetching showtimes:", e.message || e);
-    newData = {};
-  }
-
   const oldData = loadCache();
+
+  let newData;
+  try {
+    newData = await getAllShowtimesRollingMonth();
+  } catch (e) {
+    // IMPORTANT: don't overwrite cache, don't notify, fail the run
+    console.error("Error fetching showtimes:", e.message || e);
+    process.exit(1);
+  }
 
   const movieCount = Object.keys(newData).length;
   const showtimeCount = Object.values(newData).reduce((sum, arr) => sum + arr.length, 0);
