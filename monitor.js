@@ -229,6 +229,49 @@ async function getAllShowtimesRollingMonth() {
   return map;
 }
 
+function isPastShowtime(showtimeStr) {
+  // Parse "December 24 2:30 pm" format
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  
+  // Extract date and time parts
+  const match = showtimeStr.match(/^(\w+)\s+(\d+)\s+(\d+):(\d+)\s*(am|pm)$/i);
+  if (!match) return false;
+  
+  const [, month, day, hour, minute, ampm] = match;
+  
+  // Convert month name to number
+  const months = {
+    january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+    july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
+  };
+  const monthNum = months[month.toLowerCase()];
+  
+  // Convert to 24-hour format
+  let hour24 = parseInt(hour);
+  if (ampm.toLowerCase() === 'pm' && hour24 !== 12) hour24 += 12;
+  if (ampm.toLowerCase() === 'am' && hour24 === 12) hour24 = 0;
+  
+  // Create date in Melbourne timezone
+  const showtimeDate = new Date(currentYear, monthNum, parseInt(day), hour24, parseInt(minute));
+  
+  // Get current time in Melbourne
+  const nowMelbourne = new Date(now.toLocaleString('en-US', { timeZone: MEL_TZ }));
+  
+  return showtimeDate < nowMelbourne;
+}
+
+function filterPastShowtimes(showtimeMap) {
+  const filtered = {};
+  for (const [movie, times] of Object.entries(showtimeMap)) {
+    const futureTimes = times.filter(t => !isPastShowtime(t));
+    if (futureTimes.length > 0) {
+      filtered[movie] = futureTimes;
+    }
+  }
+  return filtered;
+}
+
 function loadCache() {
   if (!fs.existsSync(CACHE_FILE)) return null;
   try {
@@ -267,6 +310,34 @@ function detectChanges(oldData, newData) {
       message: `Initial check: ${movieCount} movies with ${showtimeCount} showtimes found`,
     };
   }
+
+  // Filter out past showtimes from old data before comparison
+  const filteredOldData = filterPastShowtimes(oldData);
+
+  const added = {};
+  const removed = {};
+
+  for (const [movie, times] of Object.entries(newData)) {
+    if (!filteredOldData[movie]) {
+      added[movie] = times;
+    } else {
+      const newTimes = times.filter((t) => !filteredOldData[movie].includes(t));
+      if (newTimes.length) added[movie] = newTimes;
+    }
+  }
+
+  for (const [movie, times] of Object.entries(filteredOldData)) {
+    if (!newData[movie]) {
+      removed[movie] = times;
+    } else {
+      const gone = times.filter((t) => !newData[movie].includes(t));
+      if (gone.length) removed[movie] = gone;
+    }
+  }
+
+  const changed = Object.keys(added).length > 0 || Object.keys(removed).length > 0;
+  return { changed, isInitial: false, added, removed };
+}
 
   const added = {};
   const removed = {};
