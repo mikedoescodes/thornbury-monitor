@@ -18,20 +18,26 @@ async function fetchPage(url) {
 
 async function getMovieList(html) {
   const $ = cheerio.load(html);
-  const movies = new Set();
+  const movies = [];
+  const seen = new Set();
   
-  $('a[href*="/movie/"]').each((i, el) => {
+  // Look for all links that go to /movie/
+  $('a').each((i, el) => {
     const href = $(el).attr('href');
-    if (href && href.startsWith('/movie/')) {
-      const movieSlug = href.replace('/movie/', '');
+    if (href && href.includes('/movie/')) {
+      // Extract the slug from various possible formats
+      let movieSlug = href.replace(/^.*\/movie\//, '').replace(/\/$/, '');
       const title = $(el).text().trim();
-      if (title) {
-        movies.add(JSON.stringify({ slug: movieSlug, title }));
+      
+      if (movieSlug && title && !seen.has(movieSlug)) {
+        seen.add(movieSlug);
+        movies.push({ slug: movieSlug, title });
       }
     }
   });
   
-  return Array.from(movies).map(m => JSON.parse(m));
+  console.log('Movies found:', movies);
+  return movies;
 }
 
 async function getMovieShowtimes(movieSlug) {
