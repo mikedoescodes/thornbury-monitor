@@ -1,3 +1,11 @@
+/**
+ * Thornbury Picture House showtimes monitor
+ * - Fetches showings via their GraphQL endpoint for a rolling window (today + 30 days)
+ * - Caches results to cache.json
+ * - Detects added/removed sessions vs last run
+ * - Ignores past sessions when comparing (so old sessions dropping off won't trigger)
+ */
+
 const axios = require("axios");
 const fs = require("fs");
 
@@ -40,7 +48,6 @@ query ($date: String, $ids: [ID], $movieId: ID, $movieIds: [ID], $titleClassId: 
 `;
 
 function buildHeaders(cookieHeader) {
-  // Mirrors your browser request headers closely (minus sec-ch-ua etc., which aren't necessary)
   return {
     accept: "*/*",
     "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
@@ -50,13 +57,12 @@ function buildHeaders(cookieHeader) {
     "user-agent":
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
 
-    // 🔑 These appear to be required by their backend auth/permission layer
+    // Required by backend auth/permission layer
     "client-type": "consumer",
     "circuit-id": String(CIRCUIT_ID),
     "site-id": String(SITE_ID),
     "is-electron-mode": "false",
 
-    // Cookies from priming requests
     cookie: cookieHeader,
   };
 }
@@ -84,10 +90,12 @@ function mergeSetCookies(existingCookieHeader, setCookieArray) {
 async function primeCookies() {
   let cookies = "";
 
+  const ua =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+
   const homeResp = await axios.get(HOME_URL, {
     headers: {
-      "user-agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+      "user-agent": ua,
       accept: "text/html,application/xhtml+xml",
       "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
     },
@@ -98,8 +106,7 @@ async function primeCookies() {
 
   const nowResp = await axios.get(NOW_SHOWING_URL, {
     headers: {
-      "user-agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+      "user-agent": ua,
       accept: "text/html,application/xhtml+xml",
       "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
       cookie: cookies,
@@ -179,6 +186,12 @@ async function fetchShowingsForDate(cookieHeader, ymd) {
   return resp.data?.data?.showingsForDate?.data ?? [];
 }
 
+/**
+ * Map shape:
+ *   { [movieName]: [ isoString, isoString, ... ] }
+ *
+ * We store ISO strings in cache (not formatted local strings).
+ */
 async function getAllShowtimesRollingMonth() {
   const cookieHeader = await primeCookies();
 
@@ -187,7 +200,6 @@ async function getAllShowtimesRollingMonth() {
 
   for (let i = 0; i <= DAYS_AHEAD; i++) {
     const ymd = toYMD(cursor);
-
     const showings = await fetchShowingsForDate(cookieHeader, ymd);
 
     for (const s of showings) {
@@ -195,76 +207,34 @@ async function getAllShowtimesRollingMonth() {
       const iso = s?.time;
       if (!movie || !iso) continue;
 
-      const d = new Date(iso);
-
-      const dateStr = d.toLocaleDateString("en-AU", {
-        month: "long",
-        day: "numeric",
-        timeZone: MEL_TZ,
-      });
-
-      const timeStr = d
-        .toLocaleTimeString("en-AU", {
-          hour: "numeric",
-          minute: "2-digit",
-          hour12: true,
-          timeZone: MEL_TZ,
-        })
-        .toLowerCase();
-
-      const formatted = `${dateStr} ${timeStr}`;
-
       if (!map[movie]) map[movie] = [];
-      map[movie].push(formatted);
+      map[movie].push(iso);
     }
 
     cursor = addDays(cursor, 1);
     await new Promise((r) => setTimeout(r, 150));
   }
 
+  // Deduplicate + sort chronologically
   for (const movie of Object.keys(map)) {
-    map[movie] = Array.from(new Set(map[movie])).sort();
+    map[movie] = Array.from(new Set(map[movie])).sort(
+      (a, b) => new Date(a).getTime() - new Date(b).getTime()
+    );
   }
 
   return map;
 }
 
-function isPastShowtime(showtimeStr) {
-  // Parse "December 24 2:30 pm" format
-  const now = new Date();
-  const currentYear = now.getFullYear();
-  
-  // Extract date and time parts
-  const match = showtimeStr.match(/^(\w+)\s+(\d+)\s+(\d+):(\d+)\s*(am|pm)$/i);
-  if (!match) return false;
-  
-  const [, month, day, hour, minute, ampm] = match;
-  
-  // Convert month name to number
-  const months = {
-    january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
-    july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
-  };
-  const monthNum = months[month.toLowerCase()];
-  
-  // Convert to 24-hour format
-  let hour24 = parseInt(hour);
-  if (ampm.toLowerCase() === 'pm' && hour24 !== 12) hour24 += 12;
-  if (ampm.toLowerCase() === 'am' && hour24 === 12) hour24 = 0;
-  
-  // Create date in Melbourne timezone
-  const showtimeDate = new Date(currentYear, monthNum, parseInt(day), hour24, parseInt(minute));
-  
-  // Get current time in Melbourne
-  const nowMelbourne = new Date(now.toLocaleString('en-US', { timeZone: MEL_TZ }));
-  
-  return showtimeDate < nowMelbourne;
+function isPastShowtime(isoString) {
+  const t = new Date(isoString).getTime();
+  if (!Number.isFinite(t)) return false;
+  return t < Date.now();
 }
 
 function filterPastShowtimes(showtimeMap) {
   const filtered = {};
-  for (const [movie, times] of Object.entries(showtimeMap)) {
-    const futureTimes = times.filter(t => !isPastShowtime(t));
+  for (const [movie, times] of Object.entries(showtimeMap || {})) {
+    const futureTimes = (times || []).filter((t) => !isPastShowtime(t));
     if (futureTimes.length > 0) {
       filtered[movie] = futureTimes;
     }
@@ -300,6 +270,27 @@ function formatDateTimeMelbourne(isoString) {
   });
 }
 
+function formatSessionMelbourne(isoString) {
+  const d = new Date(isoString);
+
+  const dateStr = d.toLocaleDateString("en-AU", {
+    month: "long",
+    day: "numeric",
+    timeZone: MEL_TZ,
+  });
+
+  const timeStr = d
+    .toLocaleTimeString("en-AU", {
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+      timeZone: MEL_TZ,
+    })
+    .toLowerCase();
+
+  return `${dateStr} ${timeStr}`;
+}
+
 function detectChanges(oldData, newData) {
   if (!oldData) {
     const movieCount = Object.keys(newData).length;
@@ -311,7 +302,7 @@ function detectChanges(oldData, newData) {
     };
   }
 
-  // Filter out past showtimes from old data before comparison
+  // Filter out past showtimes from old data BEFORE comparison
   const filteredOldData = filterPastShowtimes(oldData);
 
   const added = {};
@@ -352,7 +343,7 @@ function formatMessage(changes, timestampIso) {
   if (Object.keys(changes.added).length) {
     addedText = "SESSIONS ADDED:<br>\n";
     for (const [movie, times] of Object.entries(changes.added)) {
-      addedText += `${movie}: ${times.join(", ")}<br>\n`;
+      addedText += `${movie}: ${times.map(formatSessionMelbourne).join(", ")}<br>\n`;
     }
   }
 
@@ -360,7 +351,7 @@ function formatMessage(changes, timestampIso) {
   if (Object.keys(changes.removed).length) {
     removedText = "SESSIONS REMOVED:<br>\n";
     for (const [movie, times] of Object.entries(changes.removed)) {
-      removedText += `${movie}: ${times.join(", ")}<br>\n`;
+      removedText += `${movie}: ${times.map(formatSessionMelbourne).join(", ")}<br>\n`;
     }
   }
 
