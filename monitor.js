@@ -302,13 +302,15 @@ function detectChanges(oldData, newData) {
     };
   }
 
-  // Filter out past showtimes from old data BEFORE comparison
+  // Filter out past showtimes from BOTH old and new data before comparison
   const filteredOldData = filterPastShowtimes(oldData);
+  const filteredNewData = filterPastShowtimes(newData);
 
   const added = {};
   const removed = {};
 
-  for (const [movie, times] of Object.entries(newData)) {
+  // Compare filtered datasets
+  for (const [movie, times] of Object.entries(filteredNewData)) {
     if (!filteredOldData[movie]) {
       added[movie] = times;
     } else {
@@ -318,15 +320,16 @@ function detectChanges(oldData, newData) {
   }
 
   for (const [movie, times] of Object.entries(filteredOldData)) {
-    if (!newData[movie]) {
+    if (!filteredNewData[movie]) {
       removed[movie] = times;
     } else {
-      const gone = times.filter((t) => !newData[movie].includes(t));
+      const gone = times.filter((t) => !filteredNewData[movie].includes(t));
       if (gone.length) removed[movie] = gone;
     }
   }
 
   const changed = Object.keys(added).length > 0 || Object.keys(removed).length > 0;
+
   return { changed, isInitial: false, added, removed };
 }
 
